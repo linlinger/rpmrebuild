@@ -117,25 +117,77 @@ function IsPackageInstalled
 	return 0
 }
 ###############################################################################
+# for rpm file cpio bigger than 4GB, use rpm2archive to process and convert to cpio for further process
+function ProcessTar {
+	local ARCHIVE_TEMP="$1"
+	local ARCHIVE_EXTRACT_DIR="$TMPDIR_WORK/root"
+
+	[ -e "$ARCHIVE_TEMP" ] || {
+		Error "(ProcessTar) ProcessTar failed, required file not found"
+		exit 1
+	}
+	[ -e "$ARCHIVE_EXTRACT_DIR" ] || mkdir -p "$ARCHIVE_EXTRACT_DIR"
+
+	echo "ARCHIVE_TEMP: $ARCHIVE_TEMP"
+	echo "ARCHIVE_EXTRACT_DIR: $ARCHIVE_EXTRACT_DIR"
+	echo "Contents of $ARCHIVE_EXTRACT_DIR:"
+	ls -la "$TMPDIR_WORK"
+	echo "Size of $ARCHIVE_EXTRACT_DIR:"
+	echo $(du -sh $ARCHIVE_EXTRACT_DIR)
+
+	Debug "Running tar -xf $ARCHIVE_TEMP -C $ARCHIVE_EXTRACT_DIR"
+	tar -xf "$ARCHIVE_TEMP" -C "$ARCHIVE_EXTRACT_DIR" || {
+		Error "（ProcessTar） Extraction of tar file failed "
+		exit 1
+	}
+	echo $(du -sh $ARCHIVE_EXTRACT_DIR)
+	echo "Here is the size of extracted files"
+}
+
+###############################################################################
+# for rpm file, we have to extract files to BUILDROOT directory but this time is tgz
+function RpmUnpackTGZ {
+	local ARCHIVE_TEMP="$TMPDIR_WORK/${PAQUET_NAME}.tgz"
+	local PAQUETGZ="$PAQUET.tgz"
+	rpm2archive "${PAQUET}" && mv "$PAQUETGZ" "$ARCHIVE_TEMP" && ProcessTar "$ARCHIVE_TEMP" || {
+		Error "(RpmUnpack) rpm2cpio and rpm2archive failed"
+		return 1
+	}
+	rm --force "$PAQUETGZ" || return
+	echo "Ready for further processing"
+	/bin/bash "$MY_LIB_DIR"/rpmrebuild_ghost.sh "$BUILDROOT" <"$FILES_IN" || return
+	return 0
+}
+
+###############################################################################
 # for rpm file, we have to extract files to BUILDROOT directory
-function RpmUnpack
-{
+function RpmUnpack {
 	Debug '(RpmUnpack)'
 	# do not install files on /
-	[ "$BUILDROOT" = "/" ] && {
+	[ "x$BUILDROOT" = "x/" ] && {
 		Error "(RpmUnpack) $BuildRootError"
-        	return 1
+		return 1
 	}
-	local CPIO_TEMP
-	CPIO_TEMP=$TMPDIR_WORK/${PAQUET_NAME}.cpio
-	rm --force "$CPIO_TEMP"                               || return
-	rpm2cpio "${RPMREBUILD_PAQUET}" > "$CPIO_TEMP"                     || Error "(RpmUnpack) rpm2cpio" || return
-	rm    --force --recursive "$BUILDROOT"                || return
-	Mkdir_p                   "$BUILDROOT"                || return
-	(cd "$BUILDROOT" && cpio --quiet -idmu --no-absolute-filenames ) < "$CPIO_TEMP" || Error "(RpmUnpack) cpio" || return
-	rm --force "$CPIO_TEMP"                               || return
+	local CPIO_TEMP=$TMPDIR_WORK/${PAQUET_NAME}.cpio
+	echo "${PAQUET}"
+	rm --force "$CPIO_TEMP" || return
+	rpm2cpio "${PAQUET}" >"$CPIO_TEMP" || {
+		# If rpm2cpio fails, try using rpm2archive
+		echo "(RpmUnpack) rpm2cpio failed, trying rpm2archive,this might take long time"
+		rm --force "$CPIO_TEMP" || return
+		RpmUnpackTGZ
+		return
+	}
+
+	rm --force --recursive "$BUILDROOT" || return
+	Mkdir_p "$BUILDROOT" || return
+	(cd "$BUILDROOT" && cpio --quiet -idmu --no-absolute-filenames) <"$CPIO_TEMP" || {
+		Error "(RpmUnpack) cpio"
+		return 1
+	}
+	rm --force "$CPIO_TEMP" || return
 	# Process ghost files
-	/bin/bash "$MY_LIB_DIR"/rpmrebuild_ghost.sh "$BUILDROOT" < "$FILES_IN" || return
+	/bin/bash "$MY_LIB_DIR"/rpmrebuild_ghost.sh "$BUILDROOT" <"$FILES_IN" || return
 	return 0
 }
 ###############################################################################
